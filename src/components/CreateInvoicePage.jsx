@@ -10,17 +10,16 @@ import {
   DollarSign,
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
-import { pdf } from "@react-pdf/renderer";
-import { saveAs } from "file-saver";
 import InvoicePDF from "./InvoicePDF";
-import Dexie from "dexie";
-
-// ۱. تعریف دیتابیس (مشابه فایل تنظیمات)
-const db = new Dexie("InvoiceDB");
-db.version(1).stores({
-  settings: "id",
-  invoices: "++id, clientName, date" 
-});
+import {
+  getSettings,
+  getInvoice,
+  addInvoice,
+  updateInvoice,
+  getNextInvoiceNumber,
+} from "../services/db";
+import { generateAndDownloadPDF } from "../services/pdfService";
+import { isMobile } from "../services/imageOptimizer";
 
 const CreateInvoicePage = () => {
   const { id } = useParams();
@@ -55,132 +54,90 @@ const CreateInvoicePage = () => {
     discountPercent: 0,
   });
 
-  // تابع کمکی اعداد
   const formatNumber = (val) => {
     if (!val && val !== 0) return "";
     return val.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   };
+  const parseNumber = (val) => Number(val.toString().replace(/,/g, ""));
 
-  const parseNumber = (val) => {
-    return Number(val.toString().replace(/,/g, ""));
-  };
-
-  // ۲. بارگذاری اطلاعات از IndexedDB
   useEffect(() => {
-    const loadInitialData = async () => {
-      // لود اطلاعات فروشنده
-      const savedSeller = await db.settings.get("seller_data");
-      if (savedSeller) setSellerInfo(savedSeller);
-
-      // لود فاکتورها برای تعیین شماره فاکتور بعدی
-      const savedInvoices = await db.invoices.toArray();
-      
-      let nextNumber = "INV-0001";
-      if (savedInvoices.length > 0) {
-        const lastInvoice = savedInvoices.sort((a, b) => b.id - a.id)[0];
-        const match = lastInvoice.number.match(/(\d+)/);
-        if (match) {
-          const lastNum = parseInt(match[1], 10);
-          nextNumber = `INV-${String(lastNum + 1).padStart(4, "0")}`;
+    (async () => {
+      try {
+        const seller = await getSettings("seller_data");
+        if (seller) setSellerInfo(seller);
+        const nextNumber = await getNextInvoiceNumber();
+        if (id) {
+          const found = await getInvoice(id);
+          if (found) {
+            setInvoice(found);
+            return;
+          }
         }
+        setInvoice((prev) => ({
+          ...prev,
+          number: nextNumber,
+          date: new Date().toLocaleDateString("fa-IR", {
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            numberingSystem: "latn",
+          }),
+        }));
+      } catch (e) {
+        console.error(e);
       }
-
-      // اگر در حالت ویرایش هستیم
-      if (id) {
-        const found = await db.invoices.get(Number(id));
-        if (found) {
-          setInvoice(found);
-          return;
-        }
-      }
-
-      // تنظیم پیش‌فرض برای فاکتور جدید
-      setInvoice((prev) => ({
-        ...prev,
-        number: nextNumber,
-        date: new Date().toLocaleDateString("fa-IR", {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          numberingSystem: "latn",
-        }),
-      }));
-    };
-
-    loadInitialData();
+    })();
   }, [id]);
 
-  // ۳. محاسبه توتال (بدون تغییر)
   const totals = useMemo(() => {
     const items = invoice?.items || [];
     const subtotal = items.reduce((sum, item) => {
-      const qty = Number(item?.quantity) || 0;
-      const price = Number(item?.unitPrice) || 0;
-      const disc = Number(item?.discountPercent) || 0;
-      const itemTotal = qty * price;
-      const itemDiscount = itemTotal * (disc / 100);
-      return sum + (itemTotal - itemDiscount);
+      const qty = Number(item?.quantity) || 0,
+        price = Number(item?.unitPrice) || 0,
+        disc = Number(item?.discountPercent) || 0;
+      return sum + qty * price * (1 - disc / 100);
     }, 0);
-
-    let finalDiscount = 0;
     const discVal = Number(invoice?.overallDiscountValue) || 0;
-    if (invoice?.overallDiscountType === "percent") {
-      finalDiscount = subtotal * (discVal / 100);
-    } else {
-      finalDiscount = discVal;
-    }
-
-    const tax = (subtotal - finalDiscount) * (Number(invoice?.taxPercent || 0) / 100);
-    const grandTotal = subtotal - finalDiscount + tax;
-
-    return { subtotal, finalDiscount, tax, grandTotal };
+    const finalDiscount =
+      invoice?.overallDiscountType === "percent"
+        ? subtotal * (discVal / 100)
+        : discVal;
+    const tax =
+      (subtotal - finalDiscount) * (Number(invoice?.taxPercent || 0) / 100);
+    return {
+      subtotal,
+      finalDiscount,
+      tax,
+      grandTotal: subtotal - finalDiscount + tax,
+    };
   }, [invoice]);
 
-  // ۴. ثبت نهایی در IndexedDB
   const handleFinalSubmit = async () => {
     if (!invoice.clientName || (invoice.items || []).length === 0) {
       alert("لطفاً نام مشتری و حداقل یک کالا را وارد کنید.");
       return;
     }
-
     setIsGenerating(true);
-
     try {
-      const sanitizeItems = (items) =>
-        items.map((item) => ({
-          ...item,
-          quantity: Number(item.quantity) || 0,
-          unitPrice: Number(item.unitPrice) || 0,
-          discountPercent: Number(item.discountPercent) || 0,
-        }));
-
-      const finalInvoiceData = {
+      const finalData = {
         ...invoice,
-        items: sanitizeItems(invoice.items),
+        items: (invoice.items || []).map((it) => ({
+          ...it,
+          quantity: Number(it.quantity) || 0,
+          unitPrice: Number(it.unitPrice) || 0,
+          discountPercent: Number(it.discountPercent) || 0,
+        })),
         totals,
         updatedAt: new Date().toISOString(),
       };
-
-      // ذخیره یا آپدیت در IndexedDB
-      if (id) {
-        await db.invoices.update(Number(id), finalInvoiceData);
-      } else {
-        await db.invoices.add(finalInvoiceData);
-      }
-
-      // وقفه برای اطمینان از پایان عملیات دیتابیس در iOS
-      await new Promise((resolve) => setTimeout(resolve, 150));
-
-      // تولید PDF
-      const doc = <InvoicePDF invoice={finalInvoiceData} sellerInfo={sellerInfo} />;
-      const blob = await pdf(doc).toBlob();
-      const fileName = `${invoice.isProforma ? "Proforma" : "Invoice"}-${invoice.clientName}.pdf`;
-      
-      saveAs(blob, fileName);
+      if (id) await updateInvoice(Number(id), finalData);
+      else await addInvoice(finalData);
+      await generateAndDownloadPDF(finalData, sellerInfo, InvoicePDF);
       navigate("/history");
     } catch (error) {
       console.error("Submission Error:", error);
-      alert("خطایی رخ داد. احتمالاً حجم تصاویر بالاست یا فضای دیتابیس محدود شده است.");
+      const msg = isMobile() ? "\n\nراه‌حل: لوگو یا امضا را حذف کنید." : "";
+      alert(`خطا در ساخت PDF:\n${error.message}${msg}`);
     } finally {
       setIsGenerating(false);
     }
@@ -188,89 +145,99 @@ const CreateInvoicePage = () => {
 
   const handleAddItem = () => {
     if (!currentItem.name || currentItem.unitPrice <= 0) return;
-    const newItems = [...(invoice?.items || [])];
-    if (editingIndex !== null) {
-      newItems[editingIndex] = currentItem;
-    } else {
-      newItems.push(currentItem);
-    }
-    setInvoice({ ...invoice, items: newItems });
+    const items = [...(invoice?.items || [])];
+    if (editingIndex !== null) items[editingIndex] = currentItem;
+    else items.push(currentItem);
+    setInvoice({ ...invoice, items });
     setIsModalOpen(false);
-    setCurrentItem({ name: "", description: "", unit: "عدد", quantity: 1, unitPrice: 0, discountPercent: 0 });
+    setCurrentItem({
+      name: "",
+      description: "",
+      unit: "عدد",
+      quantity: 1,
+      unitPrice: 0,
+      discountPercent: 0,
+    });
     setEditingIndex(null);
   };
 
+  const inputCls =
+    "w-full rounded-xl px-4 py-3 text-sm outline-none transition-all";
+  const inputStyle = {
+    background: "var(--bg-input)",
+    border: "1px solid var(--border-subtle)",
+    color: "var(--text-1)",
+  };
+  const labelCls =
+    "text-[9px] font-bold uppercase tracking-widest px-1 block mb-1.5";
+  const labelStyle = { color: "var(--text-3)" };
+  const cardCls = "card rounded-2xl p-4 space-y-3";
+  const cardStyle = { borderColor: "var(--border-subtle)" };
+
   return (
-    // ... بقیه کدهای JSX شما (بدون تغییر در بخش UI)
-<div className="min-h-screen bg-black text-gray-100 pb-40" dir="rtl">
-      {/* Header */}
-      <nav className="sticky top-0 z-40 bg-black/80 backdrop-blur-xl border-b border-white/5">
-        <div className="max-w-2xl mx-auto px-6 h-16 flex items-center justify-between">
+    <div
+      className="min-h-screen bg-[var(--bg-base)] text-[var(--text-1)] font-sans"
+      dir="rtl"
+    >
+      <nav
+        className="sticky top-0 z-40 glass"
+        style={{ borderBottom: "1px solid var(--border-subtle)" }}
+      >
+        <div className="max-w-2xl mx-auto px-5 h-14 flex items-center justify-between">
           <button
             onClick={() => navigate(-1)}
-            className="p-2 hover:bg-white/5 rounded-full transition-colors"
+            className="p-2 rounded-xl active:scale-90 transition-all"
+            style={{ background: "var(--bg-card)", color: "var(--text-2)" }}
           >
-            <ArrowRight size={22} />
+            <ArrowRight size={20} />
           </button>
-          <span className="font-bold text-lg text-white">
+          <span className="font-bold text-sm text-[var(--text-1)]">
             {id ? "ویرایش فاکتور" : "صدور فاکتور جدید"}
           </span>
-          <div className="w-8"></div>
+          <div className="w-8" />
         </div>
       </nav>
 
-      <main className="max-w-xl mx-auto px-3 py-8 space-y-6">
-        <div className="bg-[#111111] p-4 rounded-[28px] border border-white/5 space-y-2 shadow-xl">
-          <label className="text-[10px] text-gray-200 font-black uppercase tracking-[2px] px-2 block">
+      <main className="max-w-xl mx-auto px-3 py-5 space-y-4 page-pad">
+        {/* Document Type */}
+        <div className={cardCls} style={cardStyle}>
+          <label className={labelCls} style={labelStyle}>
             نوع سند
           </label>
-
-          <div className="relative group">
-            <select
-              value={invoice.isProforma ? "proforma" : "invoice"}
-              onChange={(e) =>
-                setInvoice({
-                  ...invoice,
-                  isProforma: e.target.value === "proforma",
-                })
-              }
-              className="w-full bg-black/40 border border-white/5 rounded-2xl px-5 py-4 text-white text-sm font-bold outline-none focus:border-blue-500/30 transition-all appearance-none cursor-pointer"
-            >
-              <option value="invoice" className="bg-[#111111] ">
-                فاکتور فروش
-              </option>
-              <option value="proforma" className="bg-[#111111]">
-پیش فاکتور              </option>
-            </select>
-
-            {/* آیکون فلش سفارشی - تراز شده برای تم جدید */}
-            <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none text-gray-600 group-focus-within:text-blue-500 transition-colors">
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="3"
-                  d="M19 9l-7 7-7-7"
-                />
-              </svg>
-            </div>
-          </div>
+          <select
+            value={invoice.isProforma ? "proforma" : "invoice"}
+            onChange={(e) =>
+              setInvoice({
+                ...invoice,
+                isProforma: e.target.value === "proforma",
+              })
+            }
+            className={inputCls}
+            style={inputStyle}
+          >
+            <option value="invoice" style={{ background: "var(--bg-card)" }}>
+              فاکتور فروش
+            </option>
+            <option value="proforma" style={{ background: "var(--bg-card)" }}>
+              پیش‌فاکتور
+            </option>
+          </select>
         </div>
-        {/* شماره فاکتور و تاریخ */}
-        <div className="grid grid-cols-2 gap-4">
-          {/* شماره سند */}
-          <div className="bg-[#111111] p-4 rounded-[28px] border border-white/5 space-y-2">
-            <label className="text-[10px] text-gray-200 font-black uppercase tracking-widest px-2 block">
+
+        {/* Number & Date */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className={cardCls} style={cardStyle}>
+            <label className={labelCls} style={labelStyle}>
               شماره سند
             </label>
             <input
               dir="ltr"
-              className="w-full bg-black/40 border border-white/5 rounded-2xl px-4 py-3 text-sm font-mono font-bold text-blue-500 outline-none focus:border-blue-500/30 transition-all"
+              className={inputCls}
+              style={{
+                ...inputStyle,
+                fontFamily: "monospace",
+                color: "var(--accent)",
+              }}
               placeholder="INV-0001"
               value={invoice.number}
               onChange={(e) =>
@@ -278,39 +245,40 @@ const CreateInvoicePage = () => {
               }
             />
           </div>
-
-          {/* تاریخ با تفکیک اتوماتیک */}
-          <div className="bg-[#111111] p-4 rounded-[28px] border border-white/5 space-y-2">
-            <label className="text-[10px] text-gray-200 font-black uppercase tracking-widest px-2 block">
+          <div className={cardCls} style={cardStyle}>
+            <label className={labelCls} style={labelStyle}>
               تاریخ صدور
             </label>
             <input
               type="text"
               dir="ltr"
               inputMode="numeric"
-              className="w-full bg-black/40 border border-white/5 rounded-2xl px-4 py-3 text-sm font-mono font-bold text-white outline-none focus:border-blue-500/30 transition-all"
+              className={inputCls}
+              style={{ ...inputStyle, fontFamily: "monospace" }}
               placeholder="1402/01/01"
               value={invoice.date}
               onChange={(e) => {
-                let val = e.target.value.replace(/\D/g, ""); // فقط اعداد را نگه دار
-                if (val.length > 8) val = val.slice(0, 8); // حداکثر ۸ رقم برای تاریخ
-
-                let formatted = val;
-                if (val.length > 4 && val.length <= 6) {
-                  formatted = `${val.slice(0, 4)}/${val.slice(4)}`;
-                } else if (val.length > 6) {
-                  formatted = `${val.slice(0, 4)}/${val.slice(4, 6)}/${val.slice(6)}`;
-                }
-
-                setInvoice({ ...invoice, date: formatted });
+                let v = e.target.value.replace(/\D/g, "");
+                if (v.length > 8) v = v.slice(0, 8);
+                let f = v;
+                if (v.length > 4 && v.length <= 6)
+                  f = `${v.slice(0, 4)}/${v.slice(4)}`;
+                else if (v.length > 6)
+                  f = `${v.slice(0, 4)}/${v.slice(4, 6)}/${v.slice(6)}`;
+                setInvoice({ ...invoice, date: f });
               }}
             />
           </div>
         </div>
-        {/* اطلاعات مشتری */}
-        <div className="bg-[#111111] px-4 py-2 rounded-[20px] border border-white/5 space-y-4">
+
+        {/* Client Info */}
+        <div className="card rounded-2xl p-4 space-y-2" style={cardStyle}>
           <input
-            className="w-full bg-transparent border-b border-white/9 py-3 text-lg outline-none transition-all text-right text-white placeholder:text-gray-400"
+            className="w-full bg-transparent py-3 text-base outline-none border-b text-right"
+            style={{
+              borderColor: "var(--border-subtle)",
+              color: "var(--text-1)",
+            }}
             placeholder="نام مشتری..."
             value={invoice.clientName}
             onChange={(e) =>
@@ -318,20 +286,23 @@ const CreateInvoicePage = () => {
             }
           />
           <input
-            className="w-full bg-transparent border-b border-white/9 py-3 outline-none text-sm font-mono text-gray-200 placeholder:text-gray-400"
-            placeholder="شماره تلفن"
-            value={invoice.clientPhone}
-            dir="ltr"
+            className="w-full bg-transparent py-3 text-sm outline-none border-b font-mono"
             style={{
+              borderColor: "var(--border-subtle)",
+              color: "var(--text-2)",
               textAlign: "right",
               unicodeBidi: "plaintext",
             }}
+            dir="ltr"
+            placeholder="شماره تلفن"
+            value={invoice.clientPhone}
             onChange={(e) =>
               setInvoice({ ...invoice, clientPhone: e.target.value })
             }
           />
           <textarea
-            className="w-full bg-transparent py-3 text-right outline-none text-sm text-gray-300 resize-none placeholder:text-gray-400"
+            className="w-full bg-transparent py-3 text-sm outline-none resize-none"
+            style={{ color: "var(--text-2)" }}
             placeholder="آدرس مشتری (اختیاری)..."
             rows="2"
             value={invoice.clientAddress}
@@ -340,34 +311,37 @@ const CreateInvoicePage = () => {
             }
           />
         </div>
-        {/* اطلاعات پرداخت */}
-        <div className="bg-[#111111] px-4 py-5 rounded-[20px] border border-white/5 space-y-4">
-          <div className="space-y-1">
-            <label className="text-xs text-gray-200 font-bold uppercase tracking-wider block px-1">
+
+        {/* Payment Info */}
+        <div className="card rounded-2xl p-4 space-y-3" style={cardStyle}>
+          <div>
+            <label className={labelCls} style={labelStyle}>
               شماره حساب / کارت / شبا
             </label>
             <input
-              className="w-full bg-transparent border-b border-white/10 py-3 text-lg outline-none text-white placeholder:text-gray-400 font-mono"
-              placeholder="مثال: IR12 3456 7890 ..."
-              value={invoice.paymentAccount}
-              dir="ltr" // جهت چیدمان کاراکترها از چپ به راست
+              className={inputCls}
               style={{
-                textAlign: "right", // اما متن در سمت راست باکس نمایش داده شود
-                unicodeBidi: "plaintext", // جلوگیری از جابه‌جایی گروه‌های عددی هنگام اسپیس
+                ...inputStyle,
+                fontFamily: "monospace",
+                textAlign: "right",
+                unicodeBidi: "plaintext",
               }}
+              dir="ltr"
+              placeholder="IR12 3456 7890 ..."
+              value={invoice.paymentAccount}
               onChange={(e) =>
                 setInvoice({ ...invoice, paymentAccount: e.target.value })
               }
             />
           </div>
-
-          <div className="space-y-1">
-            <label className="text-xs text-gray-200 font-bold uppercase tracking-wider block px-1 py-1">
+          <div>
+            <label className={labelCls} style={labelStyle}>
               توضیحات پرداخت
             </label>
             <textarea
-              className="w-full bg-transparent border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-300 outline-none resize-none placeholder:text-gray-400 min-h-[70px]"
-              placeholder="مهلت پرداخت، نحوه واریز، تخفیف نقدی و ..."
+              className={inputCls}
+              style={{ ...inputStyle, resize: "none", minHeight: 70 }}
+              placeholder="مهلت پرداخت، نحوه واریز..."
               value={invoice.paymentDescription}
               onChange={(e) =>
                 setInvoice({ ...invoice, paymentDescription: e.target.value })
@@ -375,10 +349,14 @@ const CreateInvoicePage = () => {
             />
           </div>
         </div>
-        {/* لیست اقلام */}
-        <div className="space-y-3">
-          <div className="flex justify-between items-center px-2">
-            <h2 className="font-bold text-xs text-gray-200 uppercase tracking-widest">
+
+        {/* Items */}
+        <div className="space-y-2">
+          <div className="flex justify-between items-center px-1">
+            <h2
+              className="font-bold text-[10px] uppercase tracking-widest"
+              style={{ color: "var(--text-2)" }}
+            >
               اقلام فاکتور ({invoice.items?.length || 0})
             </h2>
             <button
@@ -386,42 +364,55 @@ const CreateInvoicePage = () => {
                 setEditingIndex(null);
                 setIsModalOpen(true);
               }}
-              className="text-blue-500 font-bold text-sm bg-blue-500/10 px-4 py-2 rounded-xl active:scale-95 transition-all"
+              className="font-bold text-xs px-3 py-1.5 rounded-lg active:scale-95 transition-all"
+              style={{
+                background: "var(--accent-muted)",
+                color: "var(--accent)",
+              }}
             >
               + افزودن ردیف
             </button>
           </div>
-
           {(invoice.items || []).map((item, idx) => (
             <div
               key={idx}
-              className="bg-[#111111] p-4 rounded-[20px] flex justify-between items-center border border-white/5 shadow-lg"
+              className="card rounded-2xl p-3.5 flex justify-between items-center"
+              style={cardStyle}
             >
-              <div className="space-y-1">
-                <div className="font-bold text-white">{item.name}</div>
-                <div className="text-[10px] text-gray-300 font-mono">
+              <div>
+                <div className="font-bold text-sm text-[var(--text-1)]">
+                  {item.name}
+                </div>
+                <div
+                  className="text-[9px] font-mono"
+                  style={{ color: "var(--text-3)" }}
+                >
                   {Number(item.quantity) || 0} {item.unit} ×{" "}
                   {formatNumber(item.unitPrice)}
                 </div>
               </div>
-              <div className="flex items-center gap-4 text-left">
-                <span className="font-mono font-bold text-emerald-500">
+              <div className="flex items-center gap-3">
+                <span
+                  className="font-mono font-bold text-sm"
+                  style={{ color: "var(--success)" }}
+                >
                   {formatNumber(
                     (Number(item.quantity) || 0) *
                       (Number(item.unitPrice) || 0) *
                       (1 - (Number(item.discountPercent) || 0) / 100),
                   )}
                 </span>
-                <div className="flex gap-2">
+                <div className="flex gap-1">
                   <button
                     onClick={() => {
                       setEditingIndex(idx);
                       setCurrentItem(item);
                       setIsModalOpen(true);
                     }}
-                    className="text-gray-200 hover:text-blue-500"
+                    className="p-1.5 rounded-lg"
+                    style={{ color: "var(--text-3)" }}
                   >
-                    <Edit3 size={16} />
+                    <Edit3 size={14} />
                   </button>
                   <button
                     onClick={() =>
@@ -430,57 +421,94 @@ const CreateInvoicePage = () => {
                         items: invoice.items.filter((_, i) => i !== idx),
                       })
                     }
-                    className="text-gray-200 hover:text-red-500"
+                    className="p-1.5 rounded-lg"
+                    style={{ color: "var(--text-3)" }}
                   >
-                    <Trash2 size={16} />
+                    <Trash2 size={14} />
                   </button>
                 </div>
               </div>
             </div>
           ))}
         </div>
-        {/* توضیحات کلی فاکتور */}
-        <div className="bg-[#111111] px-4 py-5 rounded-[20px] border border-white/5">
-          <label className="text-xs text-gray-200 font-bold uppercase tracking-wider block mb-3 px-1">
+
+        {/* Notes */}
+        <div className="card rounded-2xl p-4" style={cardStyle}>
+          <label className={labelCls} style={labelStyle}>
             یادداشت / توضیحات فاکتور
           </label>
           <textarea
-            className="w-full bg-transparent border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-300 outline-none resize-none placeholder:text-gray-400 min-h-[100px]"
-            placeholder="شرایط فروش، ضمانت، زمان تحویل، نکات مهم و ..."
+            className={inputCls}
+            style={{ ...inputStyle, resize: "none", minHeight: 80 }}
+            placeholder="شرایط فروش، ضمانت، زمان تحویل..."
             value={invoice.generalNotes}
             onChange={(e) =>
               setInvoice({ ...invoice, generalNotes: e.target.value })
             }
           />
         </div>
-        {/* خلاصه مالی نهایی */}
-        <div className="bg-[#111111] p-6 rounded-[20px] border border-white/5 space-y-6">
-          <div className="space-y-2">
-            <label className="text-[10px] text-gray-200 px-2 font-bold uppercase tracking-widest">
+
+        {/* Financial Summary */}
+        <div className="card rounded-2xl p-4 space-y-4" style={cardStyle}>
+          <div>
+            <label className={labelCls} style={labelStyle}>
               تخفیف کلی
             </label>
-            <div className="flex items-center gap-2 p-2 bg-black/40 rounded-2xl border border-white/5 focus-within:border-blue-500/50 transition-all">
-              <div className="flex bg-[#111111] p-1 rounded-xl border border-white/5 shadow-sm flex-shrink-0">
+            <div
+              className="flex items-center gap-2 p-2 rounded-xl"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
+              <div
+                className="flex rounded-lg p-0.5"
+                style={{
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+              >
                 <button
                   onClick={() =>
                     setInvoice({ ...invoice, overallDiscountType: "percent" })
                   }
-                  className={`p-2 px-3 rounded-lg transition-all ${invoice.overallDiscountType === "percent" ? "bg-blue-600 text-white" : "text-gray-600"}`}
+                  className="p-1.5 px-2.5 rounded-md transition-all"
+                  style={{
+                    background:
+                      invoice.overallDiscountType === "percent"
+                        ? "var(--accent)"
+                        : "transparent",
+                    color:
+                      invoice.overallDiscountType === "percent"
+                        ? "#fff"
+                        : "var(--text-3)",
+                  }}
                 >
-                  <Percent size={14} />
+                  <Percent size={12} />
                 </button>
                 <button
                   onClick={() =>
                     setInvoice({ ...invoice, overallDiscountType: "amount" })
                   }
-                  className={`p-2 px-3 rounded-lg transition-all ${invoice.overallDiscountType === "amount" ? "bg-blue-600 text-white" : "text-gray-600"}`}
+                  className="p-1.5 px-2.5 rounded-md transition-all"
+                  style={{
+                    background:
+                      invoice.overallDiscountType === "amount"
+                        ? "var(--accent)"
+                        : "transparent",
+                    color:
+                      invoice.overallDiscountType === "amount"
+                        ? "#fff"
+                        : "var(--text-3)",
+                  }}
                 >
-                  <DollarSign size={14} />
+                  <DollarSign size={12} />
                 </button>
               </div>
               <input
                 type="number"
-                className="flex-1 bg-transparent font-mono font-bold outline-none text-left px-3 py-2 text-lg text-white"
+                className="flex-1 bg-transparent font-mono font-bold outline-none text-left text-base px-2"
+                style={{ color: "var(--text-1)" }}
                 placeholder="0"
                 value={formatNumber(invoice.overallDiscountValue)}
                 onChange={(e) =>
@@ -491,212 +519,263 @@ const CreateInvoicePage = () => {
                 }
               />
             </div>
-
-            <div className="bg-black/40 p-4 rounded-2xl border border-white/5 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-orange-500">
-                <Percent size={16} />
-                <span className="text-sm font-bold">مالیات ارزش افزوده</span>
-              </div>
-              <div className="flex items-center gap-2 bg-[#111111] px-3 py-1 rounded-xl border border-white/5">
-                <input
-                  type="number"
-                  dir="ltr"
-                  className="w-12 bg-transparent text-center font-mono font-bold outline-none text-white"
-                  value={formatNumber(
-                    invoice.taxPercent === 0 ? "" : invoice.taxPercent,
-                  )}
-                  onChange={(e) =>
-                    setInvoice({
-                      ...invoice,
-                      taxPercent: parseNumber(
-                        e.target.value === "" ? 0 : Number(e.target.value),
-                      ),
-                    })
-                  }
-                />
-                <span className="text-xs text-gray-200">%</span>
-              </div>
-            </div>
           </div>
-
-          <div className="space-y-3 pt-6 border-t border-dashed border-white/10 text-sm">
-            <div className="flex justify-between text-gray-200">
-              <span>جمع کالاها:</span>
-              <span className="font-mono">{formatNumber(totals.subtotal)}</span>
+          <div
+            className="flex items-center justify-between p-3 rounded-xl"
+            style={{
+              background: "var(--bg-input)",
+              border: "1px solid var(--border-subtle)",
+            }}
+          >
+            <div
+              className="flex items-center gap-1.5"
+              style={{ color: "var(--warning)" }}
+            >
+              <Percent size={14} />
+              <span className="text-xs font-bold">مالیات ارزش افزوده</span>
             </div>
-            <div className="flex justify-between text-red-500/80 bg-red-500/5 p-2 rounded-xl">
-              <span>تخفیف مجموع:</span>
-              <span className="font-mono font-bold">
-                ({formatNumber(totals.finalDiscount)}-)
-              </span>
-            </div>
-            <div className="flex justify-between text-xl font-black pt-4 text-blue-500 border-t border-white/10">
-              <span>قابل پرداخت:</span>
-              <div className="flex items-center gap-1">
-                <span className="font-mono text-2xl tracking-tighter">
-                  {formatNumber(totals.grandTotal)}
-                </span>
-                <span className="text-[10px] font-normal text-gray-200">
-                  ریال
-                </span>
-              </div>
-            </div>
+            <input
+              type="number"
+              className="bg-transparent font-mono font-bold outline-none text-left w-16 text-sm"
+              style={{ color: "var(--text-1)" }}
+              value={invoice.taxPercent}
+              onChange={(e) =>
+                setInvoice({
+                  ...invoice,
+                  taxPercent: Number(e.target.value) || 0,
+                })
+              }
+            />
           </div>
         </div>
-      </main>
 
-      {/* دکمه اکشن */}
-      <div className="fixed bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black via-black to-transparent z-40">
+        {/* Totals */}
+        <div className="card rounded-2xl p-4 space-y-2" style={cardStyle}>
+          {[
+            { label: "جمع کل", value: totals.subtotal },
+            { label: "تخفیف", value: totals.finalDiscount },
+            { label: "مالیات", value: totals.tax },
+          ].map((r, i) => (
+            <div
+              key={i}
+              className="flex justify-between text-sm"
+              style={{ color: "var(--text-2)" }}
+            >
+              <span>{r.label}</span>
+              <span className="font-mono font-bold">
+                {formatNumber(r.value)}
+              </span>
+            </div>
+          ))}
+          <div
+            className="h-px my-1"
+            style={{ background: "var(--border-subtle)" }}
+          />
+          <div className="flex justify-between">
+            <span
+              className="font-black text-sm"
+              style={{ color: "var(--text-1)" }}
+            >
+              مبلغ قابل پرداخت
+            </span>
+            <span
+              className="font-black text-lg font-mono"
+              style={{ color: "var(--success)" }}
+            >
+              {formatNumber(totals.grandTotal)}
+            </span>
+          </div>
+        </div>
+
+        {/* Submit */}
         <button
           onClick={handleFinalSubmit}
           disabled={isGenerating}
-          className="mx-auto w-full max-w-xl h-16 bg-blue-600 text-white rounded-[20px] font-bold text-lg flex items-center justify-center gap-3 shadow-2xl shadow-blue-500/20 active:scale-95 transition-all"
+          className="w-full py-4 rounded-2xl font-black text-sm text-white active:scale-[0.97] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+          style={{
+            background: "var(--accent)",
+            boxShadow: "var(--shadow-glow)",
+          }}
         >
           {isGenerating ? (
-            <Loader2 className="animate-spin" />
+            <>
+              <Loader2 className="animate-spin" size={18} /> در حال ساخت PDF...
+            </>
           ) : (
-            <Save size={20} />
+            <>
+              <Save size={18} /> ذخیره و دانلود PDF
+            </>
           )}
-          {isGenerating
-            ? "در حال صدور..."
-            : id
-              ? "ثبت و آپدیت فاکتور"
-              : "صدور و دریافت فاکتور"}
         </button>
-      </div>
+      </main>
 
-      {/* مودال ورود کالا */}
-      <div
-        className={`fixed inset-0 z-50 transition-all duration-300 ${isModalOpen ? "opacity-100 visible" : "opacity-0 invisible"}`}
-      >
-        <div
-          className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-          onClick={() => setIsModalOpen(false)}
-        />
-        <div
-          className={`absolute bottom-0 left-0 right-0 bg-[#111111] rounded-t-[40px] p-2 border-t border-white/10 transition-transform duration-300 transform ${isModalOpen ? "translate-y-0" : "translate-y-full"}`}
-        >
-          <div className="w-12 h-1 bg-white/10 rounded-full mx-auto mb-8" />
-          <div className="space-y-4 max-h-[70vh] overflow-y-auto">
-            <input
-              className="w-full bg-black/40 border border-white/5 rounded-2xl px-5 py-4 outline-none text-right font-bold text-white"
-              placeholder="نام کالا یا خدمات"
-              value={currentItem.name}
-              onChange={(e) =>
-                setCurrentItem({ ...currentItem, name: e.target.value })
-              }
+      {/* Item Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-[60] flex items-end justify-center">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setIsModalOpen(false)}
+          />
+          <div
+            className="relative w-full max-w-2xl rounded-t-3xl p-5 animate-slide-up"
+            style={{
+              background: "var(--bg-card)",
+              borderTop: "1px solid var(--border-default)",
+              paddingBottom: "calc(24px + var(--safe-bottom))",
+            }}
+          >
+            <div
+              className="w-10 h-1 rounded-full mx-auto mb-5"
+              style={{ background: "var(--border-default)" }}
             />
-            <textarea
-              className="w-full bg-black/40 border border-white/5 rounded-2xl px-5 py-3 outline-none text-right text-xs text-gray-300 resize-none min-h-[80px]"
-              placeholder="توضیحات (اختیاری)"
-              rows="3"
-              value={currentItem.description}
-              onChange={(e) =>
-                setCurrentItem({ ...currentItem, description: e.target.value })
-              }
-            />
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-black/40 border border-white/5 p-3 rounded-2xl">
-                <label className="text-[10px] text-gray-200 px-2 block mb-1">
-                  تعداد
-                </label>
-                <input
-                  type="number"
-                  dir="ltr"
-                  className="w-full bg-transparent outline-none text-center font-mono text-white"
-                  value={currentItem.quantity === 0 ? "" : currentItem.quantity}
-                  onChange={(e) =>
-                    setCurrentItem({
-                      ...currentItem,
-                      quantity:
-                        e.target.value === "" ? 0 : Number(e.target.value),
-                    })
-                  }
-                />
-              </div>
-              <div className="bg-black/40 border border-white/5 p-3 rounded-2xl">
-                <label className="text-[10px] text-gray-200 px-2 block mb-1">
-                  واحد
-                </label>
-                <input
-                  className="w-full bg-transparent outline-none text-center text-white font-bold"
-                  value={currentItem.unit}
-                  onChange={(e) =>
-                    setCurrentItem({ ...currentItem, unit: e.target.value })
-                  }
-                />
-              </div>
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-base font-black text-[var(--text-1)]">
+                {editingIndex !== null ? "ویرایش ردیف" : "افزودن ردیف"}
+              </h2>
+              <button
+                onClick={() => setIsModalOpen(false)}
+                className="p-1.5 rounded-lg"
+                style={{
+                  background: "var(--bg-elevated)",
+                  color: "var(--text-2)",
+                }}
+              >
+                {/* <X size={16} /> */}
+              </button>
             </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-black/40 border border-white/5 p-3 rounded-2xl">
-                <label className="text-[10px] text-gray-200 px-2 block mb-1">
-                  قیمت واحد (ریال)
+            <div className="space-y-3">
+              <div>
+                <label className={labelCls} style={labelStyle}>
+                  نام کالا / خدمت *
                 </label>
                 <input
                   type="text"
-                  inputMode="numeric"
-                  className="w-full bg-transparent outline-none text-left font-mono text-white text-lg"
-                  value={formatNumber(
-                    currentItem.unitPrice === 0 ? "" : currentItem.unitPrice,
-                  )}
+                  value={currentItem.name}
                   onChange={(e) =>
-                    setCurrentItem({
-                      ...currentItem,
-                      unitPrice: parseNumber(e.target.value),
-                    })
+                    setCurrentItem({ ...currentItem, name: e.target.value })
                   }
+                  placeholder="شرح کالا یا خدمت"
+                  className={inputCls}
+                  style={inputStyle}
                 />
               </div>
-              <div className="bg-black/40 border border-white/5 p-3 rounded-2xl">
-                <label className="text-[10px] text-gray-200 px-2 block mb-1">
-                  تخفیف (٪)
+              <div>
+                <label className={labelCls} style={labelStyle}>
+                  توضیحات
                 </label>
                 <input
-                  type="number"
-                  dir="ltr"
-                  className="w-full bg-transparent outline-none text-left font-mono text-red-500"
-                  value={
-                    currentItem.discountPercent === 0
-                      ? ""
-                      : currentItem.discountPercent
-                  }
+                  type="text"
+                  value={currentItem.description}
                   onChange={(e) =>
                     setCurrentItem({
                       ...currentItem,
-                      discountPercent:
-                        e.target.value === "" ? 0 : Number(e.target.value),
+                      description: e.target.value,
                     })
                   }
+                  placeholder="توضیحات تکمیلی..."
+                  className={inputCls}
+                  style={inputStyle}
                 />
               </div>
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <label className={labelCls} style={labelStyle}>
+                    تعداد
+                  </label>
+                  <input
+                    type="number"
+                    dir="ltr"
+                    value={currentItem.quantity}
+                    onChange={(e) =>
+                      setCurrentItem({
+                        ...currentItem,
+                        quantity: Number(e.target.value) || 0,
+                      })
+                    }
+                    className={inputCls}
+                    style={{
+                      ...inputStyle,
+                      textAlign: "left",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls} style={labelStyle}>
+                    واحد
+                  </label>
+                  <input
+                    type="text"
+                    value={currentItem.unit}
+                    onChange={(e) =>
+                      setCurrentItem({ ...currentItem, unit: e.target.value })
+                    }
+                    className={inputCls}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls} style={labelStyle}>
+                    قیمت واحد *
+                  </label>
+                  <input
+                    type="number"
+                    dir="ltr"
+                    value={currentItem.unitPrice}
+                    onChange={(e) =>
+                      setCurrentItem({
+                        ...currentItem,
+                        unitPrice: Number(e.target.value) || 0,
+                      })
+                    }
+                    className={inputCls}
+                    style={{
+                      ...inputStyle,
+                      textAlign: "left",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className={labelCls} style={labelStyle}>
+                    تخفیف (%)
+                  </label>
+                  <input
+                    type="number"
+                    dir="ltr"
+                    value={currentItem.discountPercent}
+                    onChange={(e) =>
+                      setCurrentItem({
+                        ...currentItem,
+                        discountPercent: Number(e.target.value) || 0,
+                      })
+                    }
+                    className={inputCls}
+                    style={{
+                      ...inputStyle,
+                      textAlign: "left",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={handleAddItem}
+                    disabled={!currentItem.name || currentItem.unitPrice <= 0}
+                    className="w-full py-3 rounded-xl font-bold text-sm text-white active:scale-[0.97] transition-all disabled:opacity-40"
+                    style={{ background: "var(--accent)" }}
+                  >
+                    {editingIndex !== null ? "ویرایش" : "افزودن"}
+                  </button>
+                </div>
+              </div>
             </div>
-
-            <div className="bg-emerald-500/10 p-5 rounded-3xl flex justify-between items-center border border-emerald-500/20">
-              <span className="text-xs text-emerald-500 font-bold">
-                جمع این ردیف:
-              </span>
-              <span className="text-xl font-black text-emerald-500 font-mono">
-                {formatNumber(
-                  (Number(currentItem?.quantity) || 0) *
-                    (Number(currentItem?.unitPrice) || 0) *
-                    (1 - (Number(currentItem?.discountPercent) || 0) / 100),
-                )}
-              </span>
-            </div>
-
-            <button
-              onClick={handleAddItem}
-              className="w-full bg-blue-600 text-white py-5 rounded-[20px] font-bold text-lg active:scale-95 transition-all shadow-xl shadow-blue-500/10"
-            >
-              تایید و ثبت کالا
-            </button>
           </div>
         </div>
-      </div>
-    </div>    
+      )}
+    </div>
   );
 };
-
 export default CreateInvoicePage;

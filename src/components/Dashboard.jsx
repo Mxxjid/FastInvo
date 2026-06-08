@@ -1,90 +1,119 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Settings, Plus, History, FileText } from "lucide-react";
+import {
+  Settings, Plus, History, FileText,
+  Users, BarChart3, Package, TrendingUp, Clock,
+} from "lucide-react";
+import { getInvoiceStats } from "../services/db";
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const [stats, setStats] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const load = async () => {
+      try { setStats(await getInvoiceStats()); } catch (e) { console.error(e); }
+      finally { setIsLoading(false); }
+    };
+    load();
+  }, []);
+
+  const fmt = (v) => {
+    if (!v) return "۰";
+    if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+    if (v >= 1e3) return `${(v / 1e3).toFixed(0)}K`;
+    return Number(v).toLocaleString("fa-IR");
+  };
+
+  const navCards = [
+    { path: "/history", icon: History, label: "تاریخچه", sub: "مشاهده فاکتورها", color: "blue" },
+    { path: "/customers", icon: Users, label: "مشتریان", sub: "مدیریت مشتریان", color: "purple" },
+    { path: "/products", icon: Package, label: "کالا / خدمات", sub: "مدیریت محصولات", color: "emerald" },
+    { path: "/reports", icon: BarChart3, label: "گزارش‌ها", sub: "آمار و تحلیل", color: "amber" },
+  ];
+
+  const colorMap = {
+    blue:    { bg: "var(--accent-muted)", text: "var(--accent)" },
+    purple:  { bg: "var(--purple-muted)", text: "var(--purple)" },
+    emerald: { bg: "var(--success-muted)", text: "var(--success)" },
+    amber:   { bg: "var(--warning-muted)", text: "var(--warning)" },
+  };
 
   return (
-    /* حذف تمام رنگ‌های لایت و استفاده از مشکی مطلق برای بدنه */
-    <div
-      className="flex flex-col min-h-screen bg-black text-gray-100 font-sans selection:bg-blue-500/30"
-      dir="rtl"
-    >
-      {/* Header - شیشه‌ای تیره با حاشیه بسیار ظریف */}
-      <header className="sticky top-0 z-30 bg-black/60 backdrop-blur-xl border-b border-white/5">
-        <div className="max-w-2xl mx-auto px-6 h-16 flex items-center justify-center">
-          <div className="flex items-center gap-2">
-            <span className="text-lg font-black tracking-tight text-white">
-              FastInvo
-            </span>
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/20">
+    <div className="flex flex-col min-h-screen bg-[var(--bg-base)] text-[var(--text-1)] font-sans" dir="rtl">
+      {/* ── Header ── */}
+      <header className="sticky top-0 z-30 glass border-b-[var(--border-subtle)]">
+        <div className="max-w-2xl mx-auto px-5 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "var(--accent)" }}>
               <FileText className="h-4 w-4 text-white" />
             </div>
+            <span className="text-base font-black tracking-tight text-[var(--text-1)]">FastInvo</span>
           </div>
+          <button onClick={() => navigate("/settings")}
+            className="p-2 rounded-xl bg-[var(--bg-card)] text-[var(--text-2)] active:scale-90 transition-all">
+            <Settings size={18} />
+          </button>
         </div>
       </header>
 
-      {/* محتوای اصلی */}
-      <main className="flex-1 max-w-2xl mx-auto px-6 py-10 w-full space-y-4">
-        
-        {/* ۱. باکس بزرگ صدور فاکتور جدید - آبی درخشان در محیط تاریک */}
-        <div
-          onClick={() => navigate("/create-invoice")}
-          className="relative overflow-hidden bg-blue-600 rounded-[25px] p-10 flex flex-col items-center text-center cursor-pointer shadow-[0_20px_50px_rgba(37,99,235,0.2)] active:scale-[0.97] transition-all group min-h-[280px] justify-center"
-        >
-          <div className="relative z-10 flex flex-col items-center">
-            <div className="bg-white/20 p-5 rounded-[30px] mb-6 backdrop-blur-md group-hover:scale-110 group-hover:rotate-90 transition-all duration-500">
-              <Plus className="h-12 w-12 text-white" strokeWidth={3} />
-            </div>
-            <h1 className="text-3xl font-black text-white mb-3">
-              صدور فاکتور جدید
-            </h1>
-            <p className="text-blue-100 text-sm opacity-80 font-medium">
-              ایجاد فاکتور جدید در کمتر از یک دقیقه
-            </p>
+      {/* ── Content ── */}
+      <main className="flex-1 max-w-2xl mx-auto px-5 py-6 w-full space-y-5 page-pad">
+
+        {/* Quick Stats */}
+        {!isLoading && stats && stats.total > 0 && (
+          <div className="grid grid-cols-3 gap-2.5 animate-fade-in">
+            {[
+              { icon: TrendingUp, value: fmt(stats.totalRevenue), label: "درآمد", color: "var(--success)" },
+              { icon: FileText, value: stats.total, label: "فاکتور", color: "var(--accent)" },
+              { icon: Clock, value: fmt(stats.pendingAmount), label: "در انتظار", color: "var(--warning)" },
+            ].map((s, i) => (
+              <div key={i} className="card rounded-2xl p-3.5 text-center space-y-1">
+                <s.icon size={16} className="mx-auto" style={{ color: s.color }} />
+                <p className="text-sm font-black font-mono" style={{ color: s.color }}>{s.value}</p>
+                <p className="text-[8px] text-[var(--text-3)] font-bold uppercase tracking-widest">{s.label}</p>
+              </div>
+            ))}
           </div>
+        )}
 
-          {/* افکت‌های نوری پس‌زمینه برای عمق دادن به تم تاریک */}
-          <div className="absolute -top-10 -right-10 w-48 h-48 bg-white/10 rounded-full blur-3xl" />
-          <div className="absolute -bottom-10 -left-10 w-48 h-48 bg-blue-400/20 rounded-full blur-3xl" />
-        </div>
-
-        {/* ۲. ردیف پایین - استفاده از خاکستری بسیار تیره برای باکس‌ها */}
-        <div className="grid grid-cols-2 gap-4">
-          {/* باکس تاریخچه */}
-          <button
-            onClick={() => navigate("/history")}
-            className="bg-[#111111] p-8 rounded-[25px] border border-white/5 flex flex-col items-center text-center gap-3 active:scale-95 transition-all hover:bg-[#161616]"
-          >
-            <div className="w-14 h-14 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-500">
-              <History size={28} />
+        {/* Hero CTA */}
+        <button onClick={() => navigate("/create-invoice")}
+          className="w-full relative overflow-hidden rounded-3xl p-7 flex flex-col items-center text-center cursor-pointer active:scale-[0.97] transition-all group min-h-[180px] justify-center"
+          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-hover))", boxShadow: "var(--shadow-glow)" }}>
+          <div className="relative z-10 flex flex-col items-center">
+            <div className="bg-white/20 p-3.5 rounded-2xl mb-4 backdrop-blur-md group-hover:scale-110 transition-all duration-300">
+              <Plus className="h-8 w-8 text-white" strokeWidth={2.5} />
             </div>
-            <span className="font-black text-base text-gray-200">
-              تاریخچه
-            </span>
-          </button>
+            <h1 className="text-xl font-black text-white mb-1.5">صدور فاکتور جدید</h1>
+            <p className="text-white/60 text-xs font-medium">ایجاد فاکتور حرفه‌ای در کمتر از یک دقیقه</p>
+          </div>
+          <div className="absolute -top-8 -right-8 w-32 h-32 bg-white/10 rounded-full blur-2xl" />
+          <div className="absolute -bottom-8 -left-8 w-32 h-32 rounded-full blur-2xl" style={{ background: "var(--accent-glow)" }} />
+        </button>
 
-          {/* باکس تنظیمات */}
-          <button
-            onClick={() => navigate("/settings")}
-            className="bg-[#111111] p-8 rounded-[25px] border border-white/5 flex flex-col items-center text-center gap-3 active:scale-95 transition-all hover:bg-[#161616]"
-          >
-            <div className="w-14 h-14 bg-gray-500/10 rounded-2xl flex items-center justify-center text-gray-400">
-              <Settings size={28} />
-            </div>
-            <span className="font-black text-base text-gray-200">
-              تنظیمات
-            </span>
-          </button>
+        {/* Navigation Grid */}
+        <div className="grid grid-cols-2 gap-2.5">
+          {navCards.map((card) => {
+            const c = colorMap[card.color];
+            return (
+              <button key={card.path} onClick={() => navigate(card.path)}
+                className="card rounded-2xl p-5 flex flex-col items-center text-center gap-2.5 active:scale-[0.96] transition-all"
+                style={{ borderColor: "var(--border-subtle)" }}>
+                <div className="w-11 h-11 rounded-xl flex items-center justify-center" style={{ background: c.bg }}>
+                  <card.icon size={22} style={{ color: c.text }} />
+                </div>
+                <span className="font-black text-sm text-[var(--text-1)]">{card.label}</span>
+                <span className="text-[9px] text-[var(--text-3)] font-medium">{card.sub}</span>
+              </button>
+            );
+          })}
         </div>
       </main>
 
-      {/* فوتر */}
-      <footer className="py-6 text-center">
-        <p className="text-[10px] text-gray-700 font-bold tracking-widest uppercase">
-          Professional Invoice PWA v1.2.0
-        </p>
+      <footer className="py-3 text-center">
+        <p className="text-[8px] text-[var(--text-3)] font-bold tracking-widest uppercase">FastInvo Pro v2.0</p>
       </footer>
     </div>
   );

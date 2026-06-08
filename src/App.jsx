@@ -4,6 +4,10 @@ import CreateInvoicePage from "./components/CreateInvoicePage";
 import HistoryPage from "./components/HistoryPage";
 import SettingsPage from "./components/SettingsPage";
 import Preview from "./components/Preview";
+import CustomersPage from "./components/CustomersPage";
+import ProductsPage from "./components/ProductsPage";
+import ReportsPage from "./components/ReportsPage";
+import BottomNav from "./components/BottomNav";
 
 function App() {
   return (
@@ -15,7 +19,11 @@ function App() {
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/preview" element={<Preview />} />
+        <Route path="/customers" element={<CustomersPage />} />
+        <Route path="/products" element={<ProductsPage />} />
+        <Route path="/reports" element={<ReportsPage />} />
       </Routes>
+      <BottomNav />
     </div>
   );
 }

@@ -1,171 +1,121 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  ArrowRight,
-  FileText,
-  Calendar,
-  Trash2,
-  Hash,
-  Loader2,
-} from "lucide-react";
-import Dexie from "dexie";
-
-// ۱. فراخوانی دیتابیس (دقیقاً با همان نام قبلی)
-const db = new Dexie("InvoiceDB");
-db.version(1).stores({
-  settings: "id",
-  invoices: "++id, clientName, date",
-});
+import { ArrowRight, FileText, Calendar, Trash2, Hash, Loader2, Search, CheckCircle2, XCircle } from "lucide-react";
+import { getInvoices, deleteInvoice as delInv, updateInvoice } from "../services/db";
 
 const HistoryPage = () => {
   const navigate = useNavigate();
   const [invoices, setInvoices] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
 
-  // ۲. بارگذاری فاکتورها از IndexedDB
-  useEffect(() => {
-    const fetchInvoices = async () => {
-      try {
-        const savedInvoices = await db.invoices.toArray();
-        // مرتب‌سازی بر اساس ID (جدیدترین در بالا)
-        setInvoices(savedInvoices.sort((a, b) => b.id - a.id));
-      } catch (e) {
-        console.error("خطا در بارگذاری تاریخچه:", e);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    fetchInvoices();
+  const load = useCallback(async () => {
+    try { setInvoices((await getInvoices()).sort((a, b) => b.id - a.id)); }
+    catch (e) { console.error(e); } finally { setIsLoading(false); }
   }, []);
+  useEffect(() => { load(); }, [load]);
 
-  // ۳. حذف فاکتور از IndexedDB
-  const deleteInvoice = async (id, e) => {
+  const handleDelete = async (id, e) => {
     e.stopPropagation();
     if (window.confirm("آیا از حذف این فاکتور مطمئن هستید؟")) {
-      try {
-        await db.invoices.delete(id);
-        // بروزرسانی استیت برای حذف از ظاهر صفحه
-        setInvoices((prev) => prev.filter((inv) => inv.id !== id));
-      } catch (err) {
-        alert("خطا در حذف فاکتور");
-      }
+      try { await delInv(id); setInvoices(p => p.filter(i => i.id !== id)); } catch { alert("خطا در حذف"); }
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <Loader2 className="animate-spin text-blue-500" size={40} />
-      </div>
-    );
-  }
+  const toggleStatus = async (inv, e) => {
+    e.stopPropagation();
+    const ns = inv.status === "paid" ? "unpaid" : "paid";
+    try { await updateInvoice(inv.id, { ...inv, status: ns }); setInvoices(p => p.map(i => i.id === inv.id ? { ...i, status: ns } : i)); }
+    catch { alert("خطا در تغییر وضعیت"); }
+  };
+
+  const filtered = invoices.filter(inv => {
+    const ms = inv.clientName?.toLowerCase().includes(search.toLowerCase()) || inv.number?.toLowerCase().includes(search.toLowerCase());
+    const mf = filter === "all" || inv.status === filter;
+    return ms && mf;
+  });
+
+  const badge = (s) => {
+    const map = { paid: { label: "پرداخت شده", bg: "var(--success-muted)", text: "var(--success)" }, unpaid: { label: "پرداخت نشده", bg: "var(--danger-muted)", text: "var(--danger)" } };
+    const b = map[s] || { label: "پیش‌نویس", bg: "var(--bg-elevated)", text: "var(--text-3)" };
+    return <span className="text-[8px] font-bold px-2 py-0.5 rounded-md" style={{ background: b.bg, color: b.text }}>{b.label}</span>;
+  };
+
+  if (isLoading) return <div className="min-h-screen bg-[var(--bg-base)] flex items-center justify-center"><Loader2 className="animate-spin" style={{ color: "var(--accent)" }} size={36} /></div>;
 
   return (
-    <div
-      className="min-h-screen bg-black text-gray-100 pb-10 font-sans selection:bg-blue-500/30"
-      dir="rtl"
-    >
-      <header className="sticky top-0 z-30 bg-black/60 backdrop-blur-xl border-b border-white/5">
-        <div className="max-w-2xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate("/")}
-              className="p-2 rounded-xl bg-[#111111] text-gray-400 active:scale-90 transition-all"
-            >
-              <ArrowRight size={22} />
-            </button>
-            <h1 className="text-lg font-black text-white">تاریخچه فاکتورها</h1>
+    <div className="min-h-screen bg-[var(--bg-base)] text-[var(--text-1)] font-sans" dir="rtl">
+      <header className="sticky top-0 z-30 glass" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+        <div className="max-w-2xl mx-auto px-5 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button onClick={() => navigate("/")} className="p-2 rounded-xl bg-[var(--bg-card)] text-[var(--text-2)] active:scale-90 transition-all"><ArrowRight size={20} /></button>
+            <h1 className="text-base font-black text-[var(--text-1)]">تاریخچه فاکتورها</h1>
           </div>
-          <div className="px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-full">
-            <span className="text-blue-500 text-[10px] font-black uppercase tracking-widest">
-              {invoices.length} فاکتور
-            </span>
-          </div>
+          <span className="text-[9px] font-bold px-2.5 py-1 rounded-full" style={{ background: "var(--accent-muted)", color: "var(--accent)" }}>{filtered.length} فاکتور</span>
         </div>
       </header>
 
-      <main className="max-w-2xl mx-auto px-4 py-8">
-        {invoices.length === 0 ? (
-          <div className="text-center py-32 space-y-6">
-            <div className="bg-[#111111] w-24 h-24 rounded-[20px] flex items-center justify-center mx-auto border border-white/5">
-              <FileText size={40} className="text-gray-700" />
-            </div>
-            <div className="space-y-2">
-              <p className="text-gray-400 font-bold text-xl">
-                فاکتوری یافت نشد
-              </p>
-              <p className="text-gray-600 text-sm">
-                شما هنوز هیچ فاکتوری در سیستم ثبت نکرده‌اید.
-              </p>
-            </div>
-            <button
-              onClick={() => navigate("/create-invoice")}
-              className="px-8 py-3 bg-blue-600 text-white rounded-2xl font-black text-sm shadow-lg shadow-blue-500/20 active:scale-95 transition-all"
-            >
-              ساخت اولین فاکتور
-            </button>
+      <div className="max-w-2xl mx-auto px-4 pt-5 pb-2 space-y-2.5">
+        <div className="relative">
+          <Search size={16} className="absolute right-3.5 top-1/2 -translate-y-1/2" style={{ color: "var(--text-3)" }} />
+          <input type="text" placeholder="جستجو بر اساس نام مشتری یا شماره..." value={search} onChange={e => setSearch(e.target.value)}
+            className="w-full rounded-xl pr-10 pl-4 py-3 text-sm outline-none transition-all" style={{ background: "var(--bg-card)", border: "1px solid var(--border-subtle)", color: "var(--text-1)" }} />
+        </div>
+        <div className="flex gap-2">
+          {[{ k: "all", l: "همه" }, { k: "paid", l: "پرداخت شده" }, { k: "unpaid", l: "پرداخت نشده" }].map(f => (
+            <button key={f.k} onClick={() => setFilter(f.k)} className="px-3.5 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+              style={{ background: filter === f.k ? "var(--accent)" : "var(--bg-card)", color: filter === f.k ? "#fff" : "var(--text-2)", border: "1px solid", borderColor: filter === f.k ? "var(--accent)" : "var(--border-subtle)" }}>{f.l}</button>
+          ))}
+        </div>
+      </div>
+
+      <main className="max-w-2xl mx-auto px-4 space-y-2.5 page-pad">
+        {filtered.length === 0 ? (
+          <div className="text-center py-20 space-y-5">
+            <FileText size={36} className="mx-auto" style={{ color: "var(--text-3)" }} />
+            <p className="text-[var(--text-2)] font-bold">{search || filter !== "all" ? "نتیجه‌ای یافت نشد" : "فاکتوری یافت نشد"}</p>
+            <button onClick={() => navigate("/create-invoice")} className="px-6 py-2.5 rounded-xl font-bold text-sm text-white active:scale-95 transition-all" style={{ background: "var(--accent)" }}>ساخت اولین فاکتور</button>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {invoices.map((inv) => (
-              <div
-                key={inv.id}
-                onClick={() => navigate(`/edit/${inv.id}`)}
-                className="bg-[#111111] p-3 rounded-[20px] border border-white/5 active:scale-[0.98] transition-all cursor-pointer relative overflow-hidden group"
-              >
-                <div className="flex justify-between items-start mb-6">
-                  <div className="flex gap-4">
-                    <div className="w-12 h-12 bg-black/40 text-blue-500 rounded-2xl flex items-center justify-center border border-white/5">
-                      <FileText size={22} />
-                    </div>
-                    <div className="space-y-1">
-                      <h3 className="font-black text-white text-base leading-tight">
-                        {inv.clientName || "بدون نام مشتری"}
-                      </h3>
-                      <div className="flex items-center gap-3 text-[10px] text-gray-500 font-bold">
-                        <span className="flex items-center gap-1">
-                          <Calendar size={12} /> {inv.date}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Hash size={12} /> {inv.number}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={(e) => deleteInvoice(inv.id, e)}
-                    className="w-10 h-10 flex items-center justify-center text-gray-600 hover:text-red-500 active:bg-red-500/10 rounded-xl transition-all"
-                  >
-                    <Trash2 size={18} />
-                  </button>
+        ) : filtered.map(inv => (
+          <div key={inv.id} onClick={() => navigate(`/edit/${inv.id}`)} className="card rounded-2xl p-3.5 active:scale-[0.98] transition-all cursor-pointer" style={{ borderColor: "var(--border-subtle)" }}>
+            <div className="flex justify-between items-start mb-3">
+              <div className="flex gap-2.5">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "var(--accent-muted)" }}>
+                  <FileText size={18} style={{ color: "var(--accent)" }} />
                 </div>
-
-                <div className="bg-black/30 rounded-[24px] p-4 border border-white/5 flex justify-between items-end">
-                  <div className="space-y-1">
-                    <span className="text-[10px] text-gray-600 font-black uppercase block">
-                      مبلغ قابل پرداخت
-                    </span>
-                    <p className="text-emerald-500 font-black text-xl font-mono tracking-tighter">
-                      {inv.totals?.grandTotal?.toLocaleString() || 0}
-                      <span className="text-[10px] mr-1.5 text-gray-600">
-                        ریال
-                      </span>
-                    </p>
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-black text-sm text-[var(--text-1)]">{inv.clientName || "بدون نام"}</h3>
+                    {badge(inv.status)}
                   </div>
-                  <div className="text-gray-700">
-                    <span className="text-[10px] font-bold bg-white/5 px-3 py-1 rounded-lg">
-                      {inv.items?.length || 0} قلم
-                    </span>
+                  <div className="flex items-center gap-2.5 text-[9px] font-medium" style={{ color: "var(--text-3)" }}>
+                    <span className="flex items-center gap-1"><Calendar size={10} />{inv.date}</span>
+                    <span className="flex items-center gap-1"><Hash size={10} />{inv.number}</span>
                   </div>
                 </div>
               </div>
-            ))}
+              <div className="flex gap-0.5">
+                <button onClick={e => toggleStatus(inv, e)} className="w-8 h-8 flex items-center justify-center rounded-lg transition-all" style={{ color: inv.status === "paid" ? "var(--success)" : "var(--text-3)" }}>
+                  {inv.status === "paid" ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+                </button>
+                <button onClick={e => handleDelete(inv.id, e)} className="w-8 h-8 flex items-center justify-center rounded-lg transition-all" style={{ color: "var(--text-3)" }}><Trash2 size={14} /></button>
+              </div>
+            </div>
+            <div className="rounded-xl p-3 flex justify-between items-end" style={{ background: "var(--bg-surface)", border: "1px solid var(--border-subtle)" }}>
+              <div>
+                <span className="text-[8px] font-bold uppercase block" style={{ color: "var(--text-3)" }}>مبلغ قابل پرداخت</span>
+                <p className="font-black text-base font-mono" style={{ color: "var(--success)" }}>{(inv.totals?.grandTotal || 0).toLocaleString()}<span className="text-[9px] mr-1" style={{ color: "var(--text-3)" }}>ریال</span></p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] font-bold px-2 py-0.5 rounded-md" style={{ background: "var(--bg-elevated)", color: "var(--text-3)" }}>{inv.items?.length || 0} قلم</span>
+                {inv.isProforma && <span className="text-[9px] font-bold px-2 py-0.5 rounded-md" style={{ background: "var(--purple-muted)", color: "var(--purple)" }}>پیش‌فاکتور</span>}
+              </div>
+            </div>
           </div>
-        )}
+        ))}
       </main>
     </div>
   );
 };
-
 export default HistoryPage;

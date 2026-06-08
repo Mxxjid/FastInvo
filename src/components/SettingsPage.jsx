@@ -1,301 +1,102 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, Save, Building, ImageIcon, Trash2, Loader2 } from "lucide-react";
-import Dexie from "dexie";
-
-// ۱. تعریف دیتابیس (می‌توانی این را در یک فایل جداگانه بگذاری و اینجا import کنی)
-const db = new Dexie("InvoiceDB");
-db.version(1).stores({
-  settings: "id", // جدول تنظیمات که با کلید id کار می‌کند
-  invoices: "++id, clientName, date" // جدول فاکتورها (برای مراجعات بعدی)
-});
+import { getSettings, saveSettings } from "../services/db";
+import { compressImage } from "../services/imageOptimizer";
 
 const SettingsPage = () => {
   const navigate = useNavigate();
   const [isLoading, setIsLoading] = useState(true);
+  const [info, setInfo] = useState({ id: "seller_data", name: "", phone: "", email: "", officePhone: "", address: "", logo: "", signature: "" });
 
-  const [sellerInfo, setSellerInfo] = useState({
-    id: "seller_data", // یک آیدی ثابت برای تنظیمات
-    name: "",
-    phone: "",
-    email: "",
-    officePhone: "",
-    address: "",
-    logo: "",
-    signature: "",
-  });
-
-  // ۲. بارگذاری اطلاعات از IndexedDB به جای LocalStorage
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        const saved = await db.settings.get("seller_data");
-        if (saved) {
-          setSellerInfo(saved);
-        }
-      } catch (err) {
-        console.error("خطا در بارگذاری دیتابیس:", err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    loadData();
+    (async () => {
+      try { const s = await getSettings("seller_data"); if (s) setInfo(s); } catch (e) { console.error(e); } finally { setIsLoading(false); }
+    })();
   }, []);
 
-  // ۳. ذخیره اطلاعات در IndexedDB
-  const handleSave = async () => {
+  const handleSave = async () => { try { await saveSettings(info); alert("تنظیمات ذخیره شد"); navigate(-1); } catch { alert("خطا در ذخیره"); } };
+  const handleFile = async (e, field) => {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > 5e6) { alert("حجم فایل نباید بیشتر از ۵ مگابایت باشد"); return; }
     try {
-      await db.settings.put(sellerInfo); // متد put اگر باشد آپدیت می‌کند، نباشد می‌سازد
-      alert("تنظیمات در دیتابیس امن (IndexedDB) ذخیره شد");
-      navigate(-1);
-    } catch (err) {
-      alert("خطا در ذخیره‌سازی اطلاعات");
-      console.error(err);
-    }
+      const r = new FileReader();
+      r.onloadend = async () => { const compressed = await compressImage(r.result, field === "logo" ? 300 : 200, 0.6); setInfo(p => ({ ...p, [field]: compressed })); };
+      r.readAsDataURL(file);
+    } catch { alert("خطا در پردازش تصویر"); }
   };
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setSellerInfo((prev) => ({ ...prev, [name]: value }));
-  };
-
-  const handleFileChange = (e, field) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    // چک کردن حجم فایل (اختیاری اما مفید)
-    if (file.size > 2 * 1024 * 1024) {
-      alert("حجم فایل نباید بیشتر از ۲ مگابایت باشد");
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setSellerInfo((prev) => ({ ...prev, [field]: reader.result }));
-    };
-    reader.readAsDataURL(file);
-  };
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <Loader2 className="animate-spin text-blue-500" size={40} />
-      </div>
-    );
-  }
+  if (isLoading) return <div className="min-h-screen bg-[var(--bg-base)] flex items-center justify-center"><Loader2 className="animate-spin" style={{ color: "var(--accent)" }} size={36} /></div>;
 
   return (
-    <div className="min-h-screen bg-black text-gray-100 pb-20 font-sans" dir="rtl">
-      {/* هدر و بقیه کدها دقیقاً مثل قبل است، فقط در دکمه ذخیره handleSave فراخوانی می‌شود */}
-      <header className="border-b border-white/5 bg-black/60 backdrop-blur-xl sticky top-0 z-30">
-        <div className="max-w-2xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate(-1)}
-              className="p-2 rounded-xl bg-[#111111] text-gray-400 active:scale-90 transition-all"
-            >
-              <ArrowRight className="h-5 w-5" />
-            </button>
-            <h1 className="text-lg font-black tracking-tight text-white">تنظیمات فروشنده</h1>
+    <div className="min-h-screen bg-[var(--bg-base)] text-[var(--text-1)] font-sans" dir="rtl">
+      <header className="sticky top-0 z-30 glass" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+        <div className="max-w-2xl mx-auto px-5 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button onClick={() => navigate(-1)} className="p-2 rounded-xl bg-[var(--bg-card)] text-[var(--text-2)] active:scale-90 transition-all"><ArrowRight size={20} /></button>
+            <h1 className="text-base font-black text-[var(--text-1)]">تنظیمات فروشنده</h1>
           </div>
-
-          <button
-            onClick={handleSave}
-            className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-2xl font-bold text-sm shadow-lg shadow-blue-500/20 active:scale-95 transition-all"
-          >
-            <Save className="h-4 w-4" />
-            ذخیره
+          <button onClick={handleSave} className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-white font-bold text-xs active:scale-95 transition-all" style={{ background: "var(--accent)" }}>
+            <Save size={14} /> ذخیره
           </button>
         </div>
       </header>
 
-      {/* بقیه بدنه فرم (دقیقاً کدی که خودت فرستادی را اینجا قرار بده) */}
-        <main className="max-w-2xl mx-auto px-4 py-10 space-y-8">
-        {/* اطلاعات هویتی */}
-        <section className="space-y-4">
-          <div className="flex items-center gap-2 px-2 text-gray-200">
-            <Building size={18} />
-            <h2 className="font-black text-md uppercase tracking-[0.2em]">
-              اطلاعات کسب و کار
-            </h2>
-          </div>
-
-          {/* باکس اصلی با رنگ مشابه داشبورد */}
-          <div className="bg-[#111111] rounded-[20px] p-3 border border-white/5 space-y-5">
-            <div className="space-y-2">
-              <label className="text-[12px] text-gray-500 px-3 font-bold">
-                نام فروشگاه / شخص
-              </label>
-              <input
-                type="text"
-                name="name"
-                value={sellerInfo.name}
-                onChange={handleChange}
-                placeholder="مثلاً: شرکت بازرگانی آریا"
-                className="w-full px-5 py-4 bg-black/40 rounded-2xl outline-none border border-white/5 focus:border-blue-500/50 transition-all text-gray-100 placeholder:text-gray-700"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-[12px] text-gray-500 px-3 font-bold">
-                  موبایل
-                </label>
-                <input
-                  name="phone"
-                  dir="ltr"
-                  value={sellerInfo.phone}
-                  onChange={handleChange}
-                  placeholder="0912XXXXXXX"
-                  className="w-full px-5 py-4 bg-black/40 rounded-2xl outline-none border border-white/5 focus:border-blue-500/50 text-left font-mono text-gray-100"
-                  style={{
-                    unicodeBidi: "plaintext", // جلوگیری از پرش شماره به خاطر کاراکترهای خاص یا اینترناسیونال
-                  }}
-                />
+      <main className="max-w-2xl mx-auto px-4 py-6 space-y-6 page-pad">
+        {/* Business Info */}
+        <section className="space-y-3">
+          <div className="flex items-center gap-2 px-1"><Building size={16} style={{ color: "var(--text-2)" }} /><h2 className="font-black text-xs uppercase tracking-widest" style={{ color: "var(--text-2)" }}>اطلاعات کسب و کار</h2></div>
+          <div className="card rounded-2xl p-4 space-y-3" style={{ borderColor: "var(--border-subtle)" }}>
+            {[
+              { label: "نام فروشگاه / شخص", key: "name", ph: "مثلاً: شرکت بازرگانی آریا" },
+              { label: "موبایل", key: "phone", ph: "0912XXXXXXX", dir: "ltr" },
+              { label: "تلفن دفتر", key: "officePhone", ph: "021XXXXXXXX", dir: "ltr" },
+              { label: "ایمیل", key: "email", ph: "info@company.com", dir: "ltr" },
+            ].map(f => (
+              <div key={f.key}>
+                <label className="text-[10px] font-bold px-1 block mb-1" style={{ color: "var(--text-3)" }}>{f.label}</label>
+                <input type="text" dir={f.dir} name={f.key} value={info[f.key]} onChange={e => setInfo(p => ({ ...p, [f.key]: e.target.value }))} placeholder={f.ph}
+                  className="w-full rounded-xl px-4 py-3 text-sm outline-none" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-1)", textAlign: f.dir === "ltr" ? "left" : "right" }} />
               </div>
-              <div className="space-y-2">
-                <label className="text-[12px] text-gray-500 px-3 font-bold">
-                  تلفن دفتر
-                </label>
-                <input
-                  name="officePhone"
-                  dir="ltr"
-                  value={sellerInfo.officePhone}
-                  onChange={handleChange}
-                  placeholder="021XXXXXXXX"
-                  className="w-full px-5 py-4 bg-black/40 rounded-2xl outline-none border border-white/5 focus:border-blue-500/50 text-left font-mono text-gray-100"
-                  style={{
-                    unicodeBidi: "plaintext", // تضمین می‌کند که 021 همیشه سمت چپ شماره بماند
-                  }}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[12px] text-gray-500 px-3 font-bold">
-                ایمیل (اختیاری)
-              </label>
-              <input
-                type="email"
-                name="email"
-                dir="ltr"
-                value={sellerInfo.email}
-                onChange={handleChange}
-                placeholder="info@yourcompany.com"
-                className="w-full px-5 py-4 bg-black/40 rounded-2xl outline-none border border-white/5 focus:border-blue-500/50 text-left font-mono text-gray-100"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[12px] text-gray-500 px-3 font-bold">
-                نشانی کامل
-              </label>
-              <textarea
-                name="address"
-                value={sellerInfo.address}
-                onChange={handleChange}
-                rows={3}
-                placeholder="آدرس دقیق محل کسب و کار..."
-                className="w-full px-5 py-4 bg-black/40 rounded-2xl outline-none border border-white/5 focus:border-blue-500/50 resize-none text-gray-100"
-              />
+            ))}
+            <div>
+              <label className="text-[10px] font-bold px-1 block mb-1" style={{ color: "var(--text-3)" }}>نشانی کامل</label>
+              <textarea name="address" value={info.address} onChange={e => setInfo(p => ({ ...p, address: e.target.value }))} rows={3} placeholder="آدرس دقیق..."
+                className="w-full rounded-xl px-4 py-3 text-sm outline-none resize-none" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)", color: "var(--text-1)" }} />
             </div>
           </div>
         </section>
 
-        {/* بخش رسانه (لوگو و امضا) */}
-        <section className="space-y-4">
-          <div className="flex items-center gap-2 px-2 text-gray-200">
-            <ImageIcon size={18} />
-            <h2 className="font-black text-md uppercase tracking-[0.2em]">
-              تصاویر و مستندات
-            </h2>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            {/* لوگو */}
-            <div className="bg-[#111111] p-6 rounded-[20px] border border-white/5 text-center space-y-4">
-              <span className="text-[10px] font-bold text-gray-500 block uppercase">
-                لوگوی فروشگاه
-              </span>
-              <div className="relative group mx-auto w-full aspect-square bg-black/40 rounded-3xl flex items-center justify-center overflow-hidden border border-white/5">
-                {sellerInfo.logo ? (
-                  <>
-                    <img
-                      src={sellerInfo.logo}
-                      alt="Logo"
-                      className="w-full h-full object-contain p-4"
-                    />
-                    <button
-                      onClick={() => setSellerInfo((p) => ({ ...p, logo: "" }))}
-                      className="absolute inset-0 bg-red-500/90 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm"
-                    >
-                      <Trash2 size={24} />
-                    </button>
-                  </>
-                ) : (
-                  <label className="cursor-pointer w-full h-full flex flex-col items-center justify-center gap-3 active:bg-white/5 transition-colors">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => handleFileChange(e, "logo")}
-                      className="hidden"
-                    />
-                    <div className="p-3 bg-white/5 rounded-2xl">
-                      <ImageIcon className="text-gray-600" size={24} />
-                    </div>
-                    <span className="text-[10px] text-gray-500 font-bold">
-                      آپلود لوگو
-                    </span>
-                  </label>
-                )}
+        {/* Media */}
+        <section className="space-y-3">
+          <div className="flex items-center gap-2 px-1"><ImageIcon size={16} style={{ color: "var(--text-2)" }} /><h2 className="font-black text-xs uppercase tracking-widest" style={{ color: "var(--text-2)" }}>تصاویر و مستندات</h2></div>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { field: "logo", label: "لوگوی فروشگاه" },
+              { field: "signature", label: "مهر یا امضا" },
+            ].map(item => (
+              <div key={item.field} className="card rounded-2xl p-4 text-center space-y-3" style={{ borderColor: "var(--border-subtle)" }}>
+                <span className="text-[9px] font-bold uppercase block" style={{ color: "var(--text-3)" }}>{item.label}</span>
+                <div className="relative group mx-auto w-full aspect-square rounded-2xl flex items-center justify-center overflow-hidden" style={{ background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+                  {info[item.field] ? (
+                    <>
+                      <img src={info[item.field]} alt="" className="w-full h-full object-contain p-3" />
+                      <button onClick={() => setInfo(p => ({ ...p, [item.field]: "" }))} className="absolute inset-0 bg-red-500/80 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm"><Trash2 size={20} /></button>
+                    </>
+                  ) : (
+                    <label className="cursor-pointer w-full h-full flex flex-col items-center justify-center gap-2 active:bg-[var(--bg-hover)] transition-colors">
+                      <input type="file" accept="image/*" onChange={e => handleFile(e, item.field)} className="hidden" />
+                      <div className="p-2 rounded-xl" style={{ background: "var(--bg-elevated)" }}><ImageIcon size={20} style={{ color: "var(--text-3)" }} /></div>
+                      <span className="text-[9px] font-bold" style={{ color: "var(--text-3)" }}>آپلود</span>
+                    </label>
+                  )}
+                </div>
               </div>
-            </div>
-
-            {/* امضا */}
-            <div className="bg-[#111111] p-6 rounded-[20px] border border-white/5 text-center space-y-4">
-              <span className="text-[10px] font-bold text-gray-500 block uppercase">
-                مهر یا امضا
-              </span>
-              <div className="relative group mx-auto w-full aspect-square bg-black/40 rounded-3xl flex items-center justify-center overflow-hidden border border-white/5">
-                {sellerInfo.signature ? (
-                  <>
-                    <img
-                      src={sellerInfo.signature}
-                      alt="Signature"
-                      className="w-full h-full object-contain p-4"
-                    />
-                    <button
-                      onClick={() =>
-                        setSellerInfo((p) => ({ ...p, signature: "" }))
-                      }
-                      className="absolute inset-0 bg-red-500/90 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm"
-                    >
-                      <Trash2 size={24} />
-                    </button>
-                  </>
-                ) : (
-                  <label className="cursor-pointer w-full h-full flex flex-col items-center justify-center gap-3 active:bg-white/5 transition-colors">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => handleFileChange(e, "signature")}
-                      className="hidden"
-                    />
-                    <div className="p-3 bg-white/5 rounded-2xl">
-                      <ImageIcon className="text-gray-600" size={24} />
-                    </div>
-                    <span className="text-[10px] text-gray-500 font-bold">
-                      آپلود امضا
-                    </span>
-                  </label>
-                )}
-              </div>
-            </div>
+            ))}
           </div>
         </section>
       </main>
     </div>
   );
 };
-
 export default SettingsPage;
